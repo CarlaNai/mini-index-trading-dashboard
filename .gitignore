@@ -1,0 +1,14 @@
+# Never version the real trade data
+*.db
+
+# Trade screenshots (personal/sensitive data)
+uploads/
+
+# Default Python files
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environment (if you create one)
+venv/
+.venv/

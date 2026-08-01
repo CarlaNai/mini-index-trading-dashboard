@@ -208,13 +208,13 @@ def new_trade_dialog(connection):
 
         entry_col, exit_col, contracts_col = st.columns(3)
         with entry_col:
-            entry_price = st.number_input("Entrada (pts)", min_value=0.0, step=5.0)
+            entry_price = st.number_input("Entrada (pts)", min_value=0.0, step=5.0, format="%.0f")
         with exit_col:
-            exit_price = st.number_input("Saída (pts)", min_value=0.0, step=5.0)
+            exit_price = st.number_input("Saída (pts)", min_value=0.0, step=5.0, format="%.0f")
         with contracts_col:
             contracts = st.number_input("Contratos", min_value=1, step=1)
 
-        stop_points = st.number_input("Stop (pontos)", min_value=0.0, step=10.0)
+        stop_points = st.number_input("Stop (pontos)", min_value=0.0, step=10.0, format="%.0f")
 
         emotional_state = st.multiselect(
             "Estado emocional", EMOTIONAL_STATES,
@@ -856,13 +856,13 @@ else:
 
                     entry_col, exit_col, contracts_col = st.columns(3)
                     with entry_col:
-                        edit_entry_price = st.number_input("Entrada (pts)", min_value=0.0, step=5.0, value=float(trade_to_edit["entry_price"]))
+                        edit_entry_price = st.number_input("Entrada (pts)", min_value=0.0, step=5.0, value=float(trade_to_edit["entry_price"]), format="%.0f")
                     with exit_col:
-                        edit_exit_price = st.number_input("Saída (pts)", min_value=0.0, step=5.0, value=float(trade_to_edit["exit_price"]))
+                        edit_exit_price = st.number_input("Saída (pts)", min_value=0.0, step=5.0, value=float(trade_to_edit["exit_price"]), format="%.0f")
                     with contracts_col:
                         edit_contracts = st.number_input("Contratos", min_value=1, step=1, value=int(trade_to_edit["contracts"]))
 
-                    edit_stop_points = st.number_input("Stop (pontos)", min_value=0.0, step=10.0, value=float(trade_to_edit["stop_points"] or 0.0))
+                    edit_stop_points = st.number_input("Stop (pontos)", min_value=0.0, step=10.0, value=float(trade_to_edit["stop_points"] or 0.0), format="%.0f")
 
                     existing_states = [
                         state.strip() for state in (trade_to_edit.get("emotional_state") or "").split(",") if state.strip()

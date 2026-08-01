@@ -1,0 +1,11 @@
+[theme]
+# Native dark theme. Unlike overriding individual CSS selectors, this
+# makes Streamlit itself render every built-in widget (selectbox,
+# date picker, number input steppers, dropdown menus) consistently in
+# dark mode - including ones that custom CSS kept missing.
+base = "dark"
+primaryColor = "#22d6a0"
+backgroundColor = "#091012"
+secondaryBackgroundColor = "#151b22"
+textColor = "#e8eeef"
+font = "sans serif"

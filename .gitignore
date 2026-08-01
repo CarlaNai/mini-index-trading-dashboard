@@ -1,6 +1,11 @@
 # Never version the real trade data
 *.db
 
+# Streamlit secrets - contains the database password, must never be
+# committed. On Streamlit Community Cloud, the same values are set
+# through the app's "Secrets" settings instead of this file.
+.streamlit/secrets.toml
+
 # Trade screenshots (personal/sensitive data)
 uploads/
 

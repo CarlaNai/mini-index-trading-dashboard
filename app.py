@@ -283,7 +283,7 @@ st.markdown(
       #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stAppToolbar"],
       [data-testid="stDecoration"], [data-testid="stStatusWidget"] { visibility: hidden; display: none; }
       h1, h2, h3 { font-family: Inter, Arial, sans-serif !important; letter-spacing: -.035em; color: #f2f6f6 !important; }
-      h1 { font-size: 3rem !important; font-weight: 800 !important; margin-bottom: .1rem !important; line-height: 1.1 !important; }
+      h1 { font-size: 4.2rem !important; font-weight: 800 !important; margin-bottom: .15rem !important; line-height: 1.05 !important; }
       h2, h3 { font-size: 1rem !important; font-weight: 700 !important; }
       p, label { font-family: Inter, Arial, sans-serif !important; }
 
@@ -412,7 +412,7 @@ st.markdown(
       .empty-state-title { color: #b7c2c4; font-weight: 700; font-size: .88rem; margin-bottom: .2rem; }
       .empty-state-message { font-size: .78rem; line-height: 1.4; max-width: 30rem; margin: 0 auto; }
 
-      @media (max-width: 800px) { .block-container { padding: 1.2rem 1rem 2rem; } h1 { font-size: 2.1rem !important; } }
+      @media (max-width: 800px) { .block-container { padding: 1.2rem 1rem 2rem; } h1 { font-size: 2.6rem !important; } }
     </style>
     """,
     unsafe_allow_html=True,

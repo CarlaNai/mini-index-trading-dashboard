@@ -286,6 +286,27 @@ def delete_trade(connection, trade_id):
     return cursor.rowcount > 0
 
 
+def delete_trades(connection, trade_ids):
+    """
+    Delete several trades by id as a single all-or-nothing transaction -
+    either every id in trade_ids is removed, or (if something goes
+    wrong partway through, e.g. a dropped connection) none of them are.
+    Returns the number of rows actually removed.
+    """
+    if not trade_ids:
+        return 0
+    cursor = connection.cursor()
+    try:
+        placeholders = ", ".join("?" for _ in trade_ids)
+        cursor.execute(f"DELETE FROM trades WHERE id IN ({placeholders})", tuple(trade_ids))
+        removed = cursor.rowcount
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    return removed
+
+
 def save_trade(connection, trade, commit=True):
     """
     Insert a trade (dictionary created by create_trade) into the database.

@@ -11,7 +11,7 @@ from database import get_connection, ensure_connection
 from project import (
     calculate_metrics, create_trade, filter_by_setup, load_trades, save_trade,
     calculate_daily_results,
-    get_trade, update_trade, delete_trade, parse_broker_csv, calculate_net_summary,
+    get_trade, update_trade, delete_trade, delete_trades, parse_broker_csv, calculate_net_summary,
     filter_by_time_range, filter_by_shift, calculate_efficiency_breakdown,
     calculate_performance_by_hour, calculate_performance_by_weekday,
     calculate_mfe_efficiency, calculate_mae_efficiency,
@@ -264,6 +264,21 @@ def confirm_delete_dialog(connection, trade_id, trade_label):
         st.rerun()
 
 
+@st.dialog("Excluir várias operações")
+def confirm_bulk_delete_dialog(connection, trade_ids):
+    """Same confirmation pattern as confirm_delete_dialog, for a batch of trades at once."""
+    count = len(trade_ids)
+    st.markdown(f"Tem certeza de que deseja excluir **{count} operações** selecionadas?")
+    st.caption("Essa ação não pode ser desfeita.")
+    col_cancel, col_confirm = st.columns(2)
+    if col_cancel.button("Cancelar", width='stretch'):
+        st.rerun()
+    if col_confirm.button("Excluir definitivamente", type="primary", width='stretch'):
+        removed = delete_trades(connection, trade_ids)
+        st.session_state["flash_success"] = f"{removed} operações excluídas."
+        st.rerun()
+
+
 # ----------------------------------------------------------------------
 # Styling
 # ----------------------------------------------------------------------
@@ -451,7 +466,7 @@ with action_col1:
         new_trade_dialog(connection)
 
 with action_col2:
-    with st.popover("📂 Importar da corretora", width='stretch'):
+    with st.expander("📂 Importar da corretora"):
         uploaded_csv = st.file_uploader(
             "Relatório diário (.csv)", type="csv",
             help="Exporte o relatório diário de operações da sua corretora e envie o arquivo aqui.",
@@ -786,6 +801,36 @@ else:
         # Tab 4 - Gerenciar (edit/delete)
         # ------------------------------------------------------------
         with tab_manage:
+            st.markdown('<div class="section-title">EXCLUIR VÁRIAS OPERAÇÕES</div>', unsafe_allow_html=True)
+            st.markdown('<p class="manage-hint">Útil para desfazer uma importação inteira de uma vez: marque as linhas na coluna à esquerda da tabela e clique em excluir.</p>', unsafe_allow_html=True)
+
+            if working_df.empty:
+                empty_state("🗂️", "Nenhuma operação disponível", "Registre ou importe operações para poder excluí-las em lote aqui.")
+            else:
+                bulk_df = working_df.sort_values("trade_date", ascending=False)[
+                    ["id", "trade_date", "entry_time", "direction", "setup", "contracts", "result_financial"]
+                ]
+                selection = st.dataframe(
+                    bulk_df, width='stretch', hide_index=True, on_select="rerun", selection_mode="multi-row",
+                    column_config={
+                        "id": "ID", "trade_date": "Data", "entry_time": "Entrada", "direction": "Direção",
+                        "setup": "Setup", "contracts": "Contratos",
+                        "result_financial": st.column_config.NumberColumn("Resultado (R$)", format="R$ %.2f"),
+                    },
+                    key="bulk_delete_table",
+                )
+                selected_rows = selection["selection"]["rows"]
+                selected_count = len(selected_rows)
+
+                if st.button(
+                    f"🗑️ Excluir {selected_count} selecionada(s)" if selected_count else "🗑️ Excluir selecionadas",
+                    disabled=selected_count == 0,
+                ):
+                    selected_ids = [int(bulk_df.iloc[i]["id"]) for i in selected_rows]
+                    confirm_bulk_delete_dialog(connection, selected_ids)
+
+            st.divider()
+
             st.markdown('<div class="section-title">EDITAR OU EXCLUIR OPERAÇÃO</div>', unsafe_allow_html=True)
             st.markdown('<p class="manage-hint">Escolha uma operação abaixo para revisar os dados, corrigir algo ou removê-la do diário.</p>', unsafe_allow_html=True)
 

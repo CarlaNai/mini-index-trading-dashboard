@@ -167,6 +167,9 @@ class PostgresConnection:
     def commit(self):
         self._connection.commit()
 
+    def rollback(self):
+        self._connection.rollback()
+
     def close(self):
         self._connection.close()
 
@@ -194,32 +197,47 @@ def connect_postgres(connection_string):
 
 
 def create_table_postgres(connection):
-    """Postgres equivalent of create_table() - same shape, Postgres-flavored DDL."""
+    """
+    Postgres equivalent of create_table() - same shape, Postgres-flavored DDL.
+
+    "CREATE TABLE IF NOT EXISTS" does not fully protect against two
+    sessions creating the same table (and its implicit id sequence) at
+    almost the same moment - which happens in practice whenever two
+    people open the app within the same second or two. When that race
+    is what caused the failure, the table exists either way by the time
+    it's caught, so it's safe to treat as success; anything else still
+    surfaces normally.
+    """
     cursor = connection.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS trades (
-            id SERIAL PRIMARY KEY,
-            trade_date TEXT NOT NULL,
-            entry_time TEXT,
-            exit_time TEXT,
-            direction TEXT NOT NULL,
-            setup TEXT,
-            contracts INTEGER NOT NULL,
-            entry_price REAL NOT NULL,
-            exit_price REAL NOT NULL,
-            stop_points REAL,
-            mae_points REAL,
-            mfe_points REAL,
-            result_points REAL NOT NULL,
-            result_financial REAL NOT NULL,
-            emotional_state TEXT,
-            technical_notes TEXT,
-            screenshot_path TEXT,
-            is_demo INTEGER NOT NULL DEFAULT 0,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    connection.commit()
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS trades (
+                id SERIAL PRIMARY KEY,
+                trade_date TEXT NOT NULL,
+                entry_time TEXT,
+                exit_time TEXT,
+                direction TEXT NOT NULL,
+                setup TEXT,
+                contracts INTEGER NOT NULL,
+                entry_price REAL NOT NULL,
+                exit_price REAL NOT NULL,
+                stop_points REAL,
+                mae_points REAL,
+                mfe_points REAL,
+                result_points REAL NOT NULL,
+                result_financial REAL NOT NULL,
+                emotional_state TEXT,
+                technical_notes TEXT,
+                screenshot_path TEXT,
+                is_demo INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        connection.commit()
+    except Exception as error:
+        connection.rollback()
+        if "already exists" not in str(error).lower():
+            raise
     _ensure_is_demo_column_postgres(connection)
 
 
@@ -229,8 +247,13 @@ def _ensure_is_demo_column_postgres(connection):
     cursor.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'trades'")
     existing_columns = [row["column_name"] for row in cursor.fetchall()]
     if "is_demo" not in existing_columns:
-        cursor.execute("ALTER TABLE trades ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")
-        connection.commit()
+        try:
+            cursor.execute("ALTER TABLE trades ADD COLUMN is_demo INTEGER NOT NULL DEFAULT 0")
+            connection.commit()
+        except Exception as error:
+            connection.rollback()
+            if "already exists" not in str(error).lower():
+                raise
 
 
 def initialize_database_postgres(connection_string):

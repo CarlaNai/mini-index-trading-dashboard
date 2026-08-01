@@ -476,11 +476,14 @@ with action_col3:
         st.caption("Dados fictícios para explorar o painel sem operações reais.")
         demo_col1, demo_col2 = st.columns(2)
         if demo_col1.button("Carregar", width='stretch'):
-            count = seed_demo_trades(connection)
-            if count:
-                st.success(f"{count} carregadas.")
-            else:
-                st.info("Já carregados.")
+            try:
+                count = seed_demo_trades(connection)
+                if count:
+                    st.success(f"{count} carregadas.")
+                else:
+                    st.info("Já carregados.")
+            except Exception:
+                st.error("Falha de conexão ao carregar. Nada foi salvo pela metade - tente novamente.")
         if demo_col2.button("Remover", width='stretch'):
             removed = clear_demo_trades(connection)
             if removed:

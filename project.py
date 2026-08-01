@@ -286,10 +286,16 @@ def delete_trade(connection, trade_id):
     return cursor.rowcount > 0
 
 
-def save_trade(connection, trade):
+def save_trade(connection, trade, commit=True):
     """
     Insert a trade (dictionary created by create_trade) into the database.
     Returns the id of the newly created trade.
+
+    commit=False lets a caller insert several trades as a single,
+    all-or-nothing transaction (see seed_demo_trades) instead of each
+    row being its own transaction - important on a network database,
+    where a connection hiccup partway through a batch must not be able
+    to leave only some of the rows behind.
     """
     cursor = connection.cursor()
     cursor.execute("""
@@ -308,7 +314,8 @@ def save_trade(connection, trade):
         trade["emotional_state"], trade["technical_notes"],
         trade["screenshot_path"], int(trade.get("is_demo", False)),
     ))
-    connection.commit()
+    if commit:
+        connection.commit()
     return cursor.lastrowid
 
 
@@ -402,6 +409,14 @@ def seed_demo_trades(connection):
     not a hidden marker in a business field), so it can always be told
     apart from the user's real trades and removed with clear_demo_trades.
     Calling this function again after the first load is a no-op.
+
+    All 30 rows are inserted as a single transaction: if anything
+    interrupts the batch partway through (for example, a serverless
+    Postgres database like Neon suspending mid-write on a free tier),
+    none of it is kept. Without this, a partial failure could leave a
+    handful of demo rows committed, and the "already loaded" check
+    above would then skip the rest forever, silently stuck at a
+    fraction of the real dataset.
     """
     cursor = connection.cursor()
     existing = cursor.execute("SELECT 1 FROM trades WHERE is_demo = 1 LIMIT 1").fetchone()
@@ -414,24 +429,29 @@ def seed_demo_trades(connection):
     setups = ("TA", "TC", "TRM", "FQ")
     start = date(2026, 6, 2)
 
-    for index, points in enumerate(results_points):
-        trade_date = start + timedelta(days=index + (index // 5) * 2)
-        direction = "buy" if index % 3 else "sell"
-        entry_price = 138000 + index * 38
-        exit_price = entry_price + points if direction == "buy" else entry_price - points
-        trade = create_trade(
-            trade_date=str(trade_date),
-            direction=direction,
-            entry_price=entry_price,
-            exit_price=exit_price,
-            contracts=(index % 3) + 1,
-            setup=setups[index % len(setups)],
-            stop_points=180,
-            entry_time=f"{9 + (index % 5):02d}:00",
-            is_demo=True,
-        )
-        save_trade(connection, trade)
+    try:
+        for index, points in enumerate(results_points):
+            trade_date = start + timedelta(days=index + (index // 5) * 2)
+            direction = "buy" if index % 3 else "sell"
+            entry_price = 138000 + index * 38
+            exit_price = entry_price + points if direction == "buy" else entry_price - points
+            trade = create_trade(
+                trade_date=str(trade_date),
+                direction=direction,
+                entry_price=entry_price,
+                exit_price=exit_price,
+                contracts=(index % 3) + 1,
+                setup=setups[index % len(setups)],
+                stop_points=180,
+                entry_time=f"{9 + (index % 5):02d}:00",
+                is_demo=True,
+            )
+            save_trade(connection, trade, commit=False)
+    except Exception:
+        connection.rollback()
+        raise
 
+    connection.commit()
     return len(results_points)
 
 

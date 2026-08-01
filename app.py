@@ -10,7 +10,7 @@ import streamlit as st
 from database import get_connection, ensure_connection
 from project import (
     calculate_metrics, create_trade, filter_by_setup, load_trades, save_trade,
-    seed_demo_trades, clear_demo_trades, calculate_daily_results,
+    calculate_daily_results,
     get_trade, update_trade, delete_trade, parse_broker_csv, calculate_net_summary,
     filter_by_time_range, filter_by_shift, calculate_efficiency_breakdown,
     calculate_performance_by_hour, calculate_performance_by_weekday,
@@ -441,10 +441,10 @@ st.markdown('<p class="subtitle">Acompanhe seus resultados, consistência e dese
 trades_df = load_trades(connection)
 
 # Primary actions live in the main page body as a compact bar right
-# under the title - registering a trade, importing a CSV, loading demo
-# data, and exporting a backup are all one click away, without
-# competing for space with the dashboard content below.
-action_col1, action_col2, action_col3, action_col4 = st.columns([1.1, 1.4, 1.4, 1.1])
+# under the title - registering a trade, importing a CSV, and
+# exporting a backup are all one click away, without competing for
+# space with the dashboard content below.
+action_col1, action_col2, action_col3 = st.columns([1.2, 1.6, 1.2])
 
 with action_col1:
     if st.button("＋ Registrar operação", width='stretch', type="primary"):
@@ -474,26 +474,6 @@ with action_col2:
                     st.error(f"Não foi possível ler este arquivo: {error}")
 
 with action_col3:
-    with st.popover("🧪 Dados de exemplo", width='stretch'):
-        st.caption("Dados fictícios para explorar o painel sem operações reais.")
-        demo_col1, demo_col2 = st.columns(2)
-        if demo_col1.button("Carregar", width='stretch'):
-            try:
-                count = seed_demo_trades(connection)
-                if count:
-                    st.success(f"{count} carregadas.")
-                else:
-                    st.info("Já carregados.")
-            except Exception:
-                st.error("Falha de conexão ao carregar. Nada foi salvo pela metade - tente novamente.")
-        if demo_col2.button("Remover", width='stretch'):
-            removed = clear_demo_trades(connection)
-            if removed:
-                st.success(f"{removed} removidas.")
-            else:
-                st.info("Nada a remover.")
-
-with action_col4:
     # A manual backup: the database itself is safe (Neon), but this
     # gives a plain file you can keep in your own Google Drive/OneDrive
     # for extra peace of mind, or open straight in Excel.
@@ -504,6 +484,7 @@ with action_col4:
         mime="text/csv", width='stretch', disabled=trades_df.empty,
         help="Baixa uma cópia de todas as operações - útil como backup manual." if not trades_df.empty else "Sem operações para exportar ainda.",
     )
+
 
 if st.session_state.get("pending_import"):
     st.markdown('<div class="section-title">REVISAR IMPORTAÇÃO</div>', unsafe_allow_html=True)
@@ -549,27 +530,20 @@ if st.session_state.get("pending_import"):
 if trades_df.empty:
     empty_state(
         "◈", "Nenhuma operação registrada ainda",
-        "Use o botão \"+ Registrar operação\" acima para começar seu diário, "
-        "ou carregue dados de exemplo em \"Dados de exemplo\" para explorar o painel.",
+        "Use o botão \"+ Registrar operação\" acima para começar seu diário.",
     )
 else:
-    real_df = trades_df[trades_df["is_demo"] == 0]
-    demo_df = trades_df[trades_df["is_demo"] == 1]
+    # Demo data is no longer offered as a feature, but this keeps any
+    # leftover demo rows from earlier testing permanently hidden,
+    # instead of mixing fictional numbers into real performance.
+    working_df = trades_df[trades_df["is_demo"] == 0]
 
-    if real_df.empty and not demo_df.empty:
-        # Only demo data exists so far - show it, but make that explicit
-        # instead of letting fictional numbers pass as real performance.
-        st.warning("Exibindo dados de exemplo (fictícios). Nenhuma operação real foi registrada ainda.")
-        working_df = demo_df
-    elif not demo_df.empty:
-        # Both real and demo data exist - default to real data only,
-        # with an explicit opt-in to mix in the demo trades.
-        include_demo = st.checkbox("Incluir dados de exemplo na análise", value=False)
-        working_df = trades_df if include_demo else real_df
-        if not include_demo:
-            st.caption(f"Mostrando {len(real_df)} operações reais. {len(demo_df)} operações de exemplo ocultas.")
-    else:
-        working_df = real_df
+    if working_df.empty:
+        empty_state(
+            "◈", "Nenhuma operação registrada ainda",
+            "Use o botão \"+ Registrar operação\" acima para começar seu diário.",
+        )
+        st.stop()
 
     st.markdown('<div class="section-title">FILTROS</div>', unsafe_allow_html=True)
     filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)

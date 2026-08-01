@@ -283,7 +283,7 @@ st.markdown(
       #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stAppToolbar"],
       [data-testid="stDecoration"], [data-testid="stStatusWidget"] { visibility: hidden; display: none; }
       h1, h2, h3 { font-family: Inter, Arial, sans-serif !important; letter-spacing: -.035em; color: #f2f6f6 !important; }
-      h1 { font-size: 2.2rem !important; font-weight: 750 !important; margin-bottom: .05rem !important; }
+      h1 { font-size: 3rem !important; font-weight: 800 !important; margin-bottom: .1rem !important; line-height: 1.1 !important; }
       h2, h3 { font-size: 1rem !important; font-weight: 700 !important; }
       p, label { font-family: Inter, Arial, sans-serif !important; }
 
@@ -412,7 +412,7 @@ st.markdown(
       .empty-state-title { color: #b7c2c4; font-weight: 700; font-size: .88rem; margin-bottom: .2rem; }
       .empty-state-message { font-size: .78rem; line-height: 1.4; max-width: 30rem; margin: 0 auto; }
 
-      @media (max-width: 800px) { .block-container { padding: 1.2rem 1rem 2rem; } h1 { font-size: 1.7rem !important; } }
+      @media (max-width: 800px) { .block-container { padding: 1.2rem 1rem 2rem; } h1 { font-size: 2.1rem !important; } }
     </style>
     """,
     unsafe_allow_html=True,
@@ -438,11 +438,13 @@ st.markdown('<div class="eyebrow">MINI ÍNDICE · PAINEL DE PERFORMANCE</div>', 
 st.title("Evolução das operações")
 st.markdown('<p class="subtitle">Acompanhe seus resultados, consistência e desempenho por estratégia.</p>', unsafe_allow_html=True)
 
+trades_df = load_trades(connection)
+
 # Primary actions live in the main page body as a compact bar right
-# under the title - registering a trade, importing a CSV, and loading
-# demo data are all one click away, without competing for space with
-# the dashboard content below.
-action_col1, action_col2, action_col3 = st.columns([1.1, 1.4, 1.4])
+# under the title - registering a trade, importing a CSV, loading demo
+# data, and exporting a backup are all one click away, without
+# competing for space with the dashboard content below.
+action_col1, action_col2, action_col3, action_col4 = st.columns([1.1, 1.4, 1.4, 1.1])
 
 with action_col1:
     if st.button("＋ Registrar operação", width='stretch', type="primary"):
@@ -491,12 +493,63 @@ with action_col3:
             else:
                 st.info("Nada a remover.")
 
-trades_df = load_trades(connection)
+with action_col4:
+    # A manual backup: the database itself is safe (Neon), but this
+    # gives a plain file you can keep in your own Google Drive/OneDrive
+    # for extra peace of mind, or open straight in Excel.
+    export_csv = trades_df.to_csv(index=False, sep=";").encode("utf-8-sig")
+    st.download_button(
+        "⬇ Exportar CSV", data=export_csv,
+        file_name=f"operacoes_{pd.Timestamp.now().strftime('%Y-%m-%d')}.csv",
+        mime="text/csv", width='stretch', disabled=trades_df.empty,
+        help="Baixa uma cópia de todas as operações - útil como backup manual." if not trades_df.empty else "Sem operações para exportar ainda.",
+    )
+
+if st.session_state.get("pending_import"):
+    st.markdown('<div class="section-title">REVISAR IMPORTAÇÃO</div>', unsafe_allow_html=True)
+    st.caption(f"{len(st.session_state.pending_import)} operações lidas do arquivo. Preencha o setup de cada uma e confirme.")
+
+    import_df = pd.DataFrame(st.session_state.pending_import)
+    import_df["setup"] = import_df["setup"].fillna("TA")
+    import_df["technical_notes"] = import_df["technical_notes"].fillna("")
+
+    display_columns = [
+        "trade_date", "entry_time", "exit_time", "direction", "contracts",
+        "entry_price", "exit_price", "result_financial", "setup", "technical_notes",
+    ]
+    edited_df = st.data_editor(
+        import_df[display_columns],
+        width='stretch',
+        hide_index=True,
+        disabled=[c for c in display_columns if c not in ("setup", "technical_notes")],
+        column_config={
+            "setup": st.column_config.SelectboxColumn("Setup", options=SETUP_OPTIONS, required=True),
+            "technical_notes": st.column_config.TextColumn("Leitura técnica"),
+            "result_financial": st.column_config.NumberColumn("Resultado (R$)", format="R$ %.2f"),
+        },
+        key="import_review_editor",
+    )
+
+    import_col1, import_col2 = st.columns(2)
+    if import_col1.button("Confirmar importação", type="primary", width='stretch'):
+        for original, (_, edited_row) in zip(st.session_state.pending_import, edited_df.iterrows()):
+            original["setup"] = edited_row["setup"]
+            original["technical_notes"] = edited_row["technical_notes"] or None
+            save_trade(connection, original)
+        st.session_state.pending_import = None
+        st.session_state["flash_success"] = "Operações importadas com sucesso."
+        st.rerun()
+
+    if import_col2.button("Cancelar importação", width='stretch'):
+        st.session_state.pending_import = None
+        st.rerun()
+
+    st.divider()
 
 if trades_df.empty:
     empty_state(
         "◈", "Nenhuma operação registrada ainda",
-        "Use o formulário \"Registrar operação\" na barra lateral para começar seu diário, "
+        "Use o botão \"+ Registrar operação\" acima para começar seu diário, "
         "ou carregue dados de exemplo em \"Dados de exemplo\" para explorar o painel.",
     )
 else:
@@ -756,50 +809,9 @@ else:
                 st.dataframe(filtered_df, width='stretch', hide_index=True)
 
         # ------------------------------------------------------------
-        # Tab 4 - Gerenciar (import review + edit/delete)
+        # Tab 4 - Gerenciar (edit/delete)
         # ------------------------------------------------------------
         with tab_manage:
-            if st.session_state.get("pending_import"):
-                st.markdown('<div class="section-title">REVISAR IMPORTAÇÃO</div>', unsafe_allow_html=True)
-                st.caption(f"{len(st.session_state.pending_import)} operações lidas do arquivo. Preencha o setup de cada uma e confirme.")
-
-                import_df = pd.DataFrame(st.session_state.pending_import)
-                import_df["setup"] = import_df["setup"].fillna("TA")
-                import_df["technical_notes"] = import_df["technical_notes"].fillna("")
-
-                display_columns = [
-                    "trade_date", "entry_time", "exit_time", "direction", "contracts",
-                    "entry_price", "exit_price", "result_financial", "setup", "technical_notes",
-                ]
-                edited_df = st.data_editor(
-                    import_df[display_columns],
-                    width='stretch',
-                    hide_index=True,
-                    disabled=[c for c in display_columns if c not in ("setup", "technical_notes")],
-                    column_config={
-                        "setup": st.column_config.SelectboxColumn("Setup", options=SETUP_OPTIONS, required=True),
-                        "technical_notes": st.column_config.TextColumn("Leitura técnica"),
-                        "result_financial": st.column_config.NumberColumn("Resultado (R$)", format="R$ %.2f"),
-                    },
-                    key="import_review_editor",
-                )
-
-                import_col1, import_col2 = st.columns(2)
-                if import_col1.button("Confirmar importação", type="primary", width='stretch'):
-                    for original, (_, edited_row) in zip(st.session_state.pending_import, edited_df.iterrows()):
-                        original["setup"] = edited_row["setup"]
-                        original["technical_notes"] = edited_row["technical_notes"] or None
-                        save_trade(connection, original)
-                    st.session_state.pending_import = None
-                    st.session_state["flash_success"] = "Operações importadas com sucesso."
-                    st.rerun()
-
-                if import_col2.button("Cancelar importação", width='stretch'):
-                    st.session_state.pending_import = None
-                    st.rerun()
-
-                st.divider()
-
             st.markdown('<div class="section-title">EDITAR OU EXCLUIR OPERAÇÃO</div>', unsafe_allow_html=True)
             st.markdown('<p class="manage-hint">Escolha uma operação abaixo para revisar os dados, corrigir algo ou removê-la do diário.</p>', unsafe_allow_html=True)
 

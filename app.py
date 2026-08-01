@@ -283,7 +283,7 @@ st.markdown(
       #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stAppToolbar"],
       [data-testid="stDecoration"], [data-testid="stStatusWidget"] { visibility: hidden; display: none; }
       h1, h2, h3 { font-family: Inter, Arial, sans-serif !important; letter-spacing: -.035em; color: #f2f6f6 !important; }
-      h1 { font-size: 4.2rem !important; font-weight: 800 !important; margin-bottom: .15rem !important; line-height: 1.05 !important; }
+      h1 { font-size: 1.9rem !important; font-weight: 700 !important; margin-bottom: .15rem !important; line-height: 1.2 !important; }
       h2, h3 { font-size: 1rem !important; font-weight: 700 !important; }
       p, label { font-family: Inter, Arial, sans-serif !important; }
 
@@ -321,7 +321,7 @@ st.markdown(
       .metric-delta { color: #8d9a9e; font-size: .73rem; }
 
       .block-container { max-width: 1680px; padding: 1.3rem 2.2rem 3rem; }
-      .eyebrow { color: #38d6b1; font-size: .68rem; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; margin-bottom: .3rem; }
+      .eyebrow { color: #38d6b1; font-size: 1.5rem; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; margin-bottom: .4rem; }
       .subtitle { color: #8d9a9e; margin-top: 0; margin-bottom: 1.3rem; }
       .section-title { color: #dce6e5; font-size: 1rem; font-weight: 720; margin: 1.6rem 0 .7rem; }
       .chart-card {
@@ -412,7 +412,7 @@ st.markdown(
       .empty-state-title { color: #b7c2c4; font-weight: 700; font-size: .88rem; margin-bottom: .2rem; }
       .empty-state-message { font-size: .78rem; line-height: 1.4; max-width: 30rem; margin: 0 auto; }
 
-      @media (max-width: 800px) { .block-container { padding: 1.2rem 1rem 2rem; } h1 { font-size: 2.6rem !important; } }
+      @media (max-width: 800px) { .block-container { padding: 1.2rem 1rem 2rem; } h1 { font-size: 1.5rem !important; } .eyebrow { font-size: 1.1rem; } }
     </style>
     """,
     unsafe_allow_html=True,

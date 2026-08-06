@@ -5,15 +5,19 @@ from datetime import timedelta
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from database import get_connection, ensure_connection
 from project import (
     calculate_metrics, create_trade, filter_by_setup, load_trades, save_trade,
     calculate_daily_results,
-    get_trade, update_trade, delete_trade, delete_trades, parse_broker_csv, calculate_net_summary,
+    get_trade, update_trade, delete_trades, parse_broker_csv, calculate_net_summary,
     filter_by_time_range, filter_by_shift, calculate_efficiency_breakdown,
     calculate_performance_by_hour, calculate_performance_by_weekday,
+    calculate_performance_by_setup, calculate_performance_by_direction,
+    calculate_performance_by_emotional_state,
+    calculate_revenge_trading_pattern, calculate_performance_by_day_start,
     calculate_mfe_efficiency, calculate_mae_efficiency,
 )
 
@@ -38,7 +42,42 @@ def format_currency(value):
     return f"{sign}R$ {value:,.2f}"
 
 
-def render_metric(column, label, value_text, delta_text=None, numeric_value=None, tone=None):
+def evaluate_profitability(metrics):
+    """
+    Single source of truth for "is this system profitable" - win rate,
+    payoff and profit factor are three different views of exactly the
+    same underlying inequality (total gains vs total losses), so this
+    computes it once and every card that colors itself by profitability
+    reads from here, guaranteeing they never disagree with each other.
+
+    Rule of thumb: Win rate × Payoff > (1 - Win rate) × 1.
+    Rearranged, that same line also gives the breakeven win rate for the
+    current payoff, and the breakeven payoff for the current win rate.
+    """
+    win_rate_frac = metrics["win_rate"] / 100
+    payoff = metrics["risk_reward"]
+
+    if payoff is None or win_rate_frac <= 0:
+        return {
+            "payoff": payoff, "win_rate_frac": win_rate_frac,
+            "gain_side": None, "loss_side": None, "is_profitable": None,
+            "required_win_rate": None, "required_payoff": None,
+        }
+
+    gain_side = win_rate_frac * payoff
+    loss_side = 1 - win_rate_frac
+    return {
+        "payoff": payoff,
+        "win_rate_frac": win_rate_frac,
+        "gain_side": gain_side,
+        "loss_side": loss_side,
+        "is_profitable": gain_side > loss_side,
+        "required_win_rate": 1 / (1 + payoff) if payoff > 0 else 1.0,
+        "required_payoff": (loss_side / win_rate_frac) if win_rate_frac > 0 else None,
+    }
+
+
+def render_metric(column, label, value_text, delta_text=None, numeric_value=None, tone=None, compact=False, help_text=None):
     """
     Render one metric card as custom HTML instead of st.metric.
 
@@ -47,6 +86,11 @@ def render_metric(column, label, value_text, delta_text=None, numeric_value=None
     positive numbers render green, negative numbers render red. This is what
     lets Max Drawdown and Média Perdedora show up in red like a real loss,
     while Resultado Total still turns green on a profitable period.
+
+    help_text, if given, adds a small "ⓘ" next to the label with a native
+    browser tooltip (via the HTML title attribute) - no JS needed, works
+    the same as st.metric's own help icon would, for a card type that
+    isn't built with st.metric.
     """
     if tone is None:
         if numeric_value is None or numeric_value == 0:
@@ -55,10 +99,12 @@ def render_metric(column, label, value_text, delta_text=None, numeric_value=None
             tone = "gain" if numeric_value > 0 else "loss"
 
     delta_html = f'<div class="metric-delta">{delta_text}</div>' if delta_text else ""
+    card_class = "metric-card metric-card-compact" if compact else "metric-card"
+    help_html = f'<span class="metric-help" title="{help_text}">ⓘ</span>' if help_text else ""
     column.markdown(
         f"""
-        <div class="metric-card">
-          <div class="metric-label">{label}</div>
+        <div class="{card_class}">
+          <div class="metric-label">{label}{help_html}</div>
           <div class="metric-value metric-{tone}">{value_text}</div>
           {delta_html}
         </div>
@@ -86,6 +132,41 @@ def dark_chart(fig):
         side="right",
     )
     return fig
+
+
+def split_by_sign(x_values, y_values):
+    """
+    Split an (x, y) line into runs of consecutive points that share the
+    same sign, inserting an interpolated point exactly where the line
+    crosses zero between two points of opposite sign. Used to color an
+    equity curve green above zero and red below it, with the color
+    change landing precisely on the zero line instead of at whichever
+    real data point happens to sit on either side of it.
+
+    Returns a list of (segment_x, segment_y, is_positive) tuples.
+    """
+    x_values = list(x_values)
+    y_values = list(y_values)
+    segments = []
+    current_x, current_y = [x_values[0]], [y_values[0]]
+    current_positive = y_values[0] >= 0
+
+    for i in range(1, len(x_values)):
+        prev_y, curr_y = y_values[i - 1], y_values[i]
+        is_positive = curr_y >= 0
+        if is_positive != current_positive and prev_y != curr_y:
+            fraction = prev_y / (prev_y - curr_y)
+            cross_x = x_values[i - 1] + (x_values[i] - x_values[i - 1]) * fraction
+            current_x.append(cross_x)
+            current_y.append(0.0)
+            segments.append((current_x, current_y, current_positive))
+            current_x, current_y = [cross_x], [0.0]
+            current_positive = is_positive
+        current_x.append(x_values[i])
+        current_y.append(curr_y)
+
+    segments.append((current_x, current_y, current_positive))
+    return segments
 
 
 def pnl_bar_chart(df, x_col, x_label):
@@ -246,36 +327,19 @@ def new_trade_dialog(connection):
                     st.error(f"Não foi possível registrar: {error}")
 
 
-@st.dialog("Excluir operação")
-def confirm_delete_dialog(connection, trade_id, trade_label):
-    """
-    A real modal confirmation for a destructive action, instead of a
-    checkbox-then-button pattern. This traps focus on the decision and
-    makes accidental deletion much harder.
-    """
-    st.markdown(f"Tem certeza de que deseja excluir a operação **{trade_label}**?")
-    st.caption("Essa ação não pode ser desfeita.")
-    col_cancel, col_confirm = st.columns(2)
-    if col_cancel.button("Cancelar", width='stretch'):
-        st.rerun()
-    if col_confirm.button("Excluir definitivamente", type="primary", width='stretch'):
-        delete_trade(connection, trade_id)
-        st.session_state["flash_success"] = "Operação excluída."
-        st.rerun()
-
-
-@st.dialog("Excluir várias operações")
+@st.dialog("Excluir operação(ões)")
 def confirm_bulk_delete_dialog(connection, trade_ids):
-    """Same confirmation pattern as confirm_delete_dialog, for a batch of trades at once."""
+    """Same confirmation pattern as confirm_delete_dialog, for one or more trades at once."""
     count = len(trade_ids)
-    st.markdown(f"Tem certeza de que deseja excluir **{count} operações** selecionadas?")
+    label = "**1 operação**" if count == 1 else f"**{count} operações**"
+    st.markdown(f"Tem certeza de que deseja excluir {label} selecionada(s)?")
     st.caption("Essa ação não pode ser desfeita.")
     col_cancel, col_confirm = st.columns(2)
     if col_cancel.button("Cancelar", width='stretch'):
         st.rerun()
     if col_confirm.button("Excluir definitivamente", type="primary", width='stretch'):
         removed = delete_trades(connection, trade_ids)
-        st.session_state["flash_success"] = f"{removed} operações excluídas."
+        st.session_state["flash_success"] = f"{removed} operação(ões) excluída(s)."
         st.rerun()
 
 
@@ -328,6 +392,15 @@ st.markdown(
         transition: border-color .15s ease, transform .15s ease;
       }
       .metric-card:hover { border-color: #3a4850; transform: translateY(-1px); }
+      .metric-card-compact { padding: .7rem .75rem; height: 84px; gap: .2rem; overflow: hidden; }
+      .metric-card-compact .metric-label { font-size: .6rem; letter-spacing: .05em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .metric-card-compact .metric-value { font-size: 1.15rem; }
+      .metric-card-compact .metric-delta { font-size: .64rem; }
+      .metric-help {
+        display: inline-block; margin-left: .3rem; color: #6b7a7f; cursor: help;
+        font-size: .82em; font-weight: 400; letter-spacing: 0; text-transform: none;
+      }
+      .metric-help:hover { color: #9ba9ad; }
       .metric-label { color: #9ba9ad; font-size: .69rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
       .metric-value { font-size: 1.55rem; font-family: Consolas, monospace; font-weight: 700; }
       .metric-value.metric-gain { color: #22d6a0; }
@@ -351,16 +424,6 @@ st.markdown(
       }
       [data-testid="stVerticalBlockBorderWrapper"] [data-testid="stPlotlyChart"] { margin-top: -.5rem; }
 
-      /* Compact stat rows shown next to the efficiency donut chart */
-      .eff-stats { display: flex; flex-direction: column; justify-content: center; gap: .55rem; height: 100%; padding: .6rem .8rem; }
-      .eff-row { display: flex; align-items: center; gap: .55rem; font-size: .86rem; }
-      .eff-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
-      .eff-dot-gain { background: #22d6a0; }
-      .eff-dot-loss { background: #fa5c78; }
-      .eff-dot-neutral { background: #5b6f74; }
-      .eff-label { color: #b7c2c4; flex-grow: 1; }
-      .eff-count { color: #eef6f4; font-family: Consolas, monospace; font-weight: 700; }
-      .eff-share { color: #778489; font-size: .74rem; width: 2.6rem; text-align: right; }
 
       [data-testid="stForm"] { border: 1px solid #2a373c; background: rgba(9, 14, 17, .35); border-radius: 10px; padding: .8rem; }
       div[data-baseweb="select"] > div, div[data-baseweb="base-input"] > div, div[data-baseweb="input"] > div {
@@ -528,10 +591,24 @@ if st.session_state.get("pending_import"):
 
     import_col1, import_col2 = st.columns(2)
     if import_col1.button("Confirmar importação", type="primary", width='stretch'):
-        for original, (_, edited_row) in zip(st.session_state.pending_import, edited_df.iterrows()):
-            original["setup"] = edited_row["setup"]
-            original["technical_notes"] = edited_row["technical_notes"] or None
-            save_trade(connection, original)
+        # Committing 200+ rows one network round-trip at a time (the old
+        # behavior) could take long enough that it looked frozen, and a
+        # dropped connection partway through left orphaned rows behind
+        # with no way to tell. This mirrors the same all-or-nothing
+        # batch pattern already used for seed_demo_trades: one
+        # transaction, a visible spinner, and a rollback (nothing kept)
+        # if anything goes wrong.
+        with st.spinner(f"Importando {len(st.session_state.pending_import)} operações..."):
+            try:
+                for original, (_, edited_row) in zip(st.session_state.pending_import, edited_df.iterrows()):
+                    original["setup"] = edited_row["setup"]
+                    original["technical_notes"] = edited_row["technical_notes"] or None
+                    save_trade(connection, original, commit=False)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                st.error("Falha de conexão durante a importação. Nada foi salvo pela metade - tente novamente.")
+                st.stop()
         st.session_state.pending_import = None
         st.session_state["flash_success"] = "Operações importadas com sucesso."
         st.rerun()
@@ -602,11 +679,54 @@ else:
 
         # These four numbers are the "vital signs" of the journal, so they
         # stay visible above the tabs regardless of which section is open.
-        row_one = st.columns(4)
-        render_metric(row_one[0], "Resultado total", format_currency(metrics["total_result"]), numeric_value=metrics["total_result"])
-        render_metric(row_one[1], "Win rate", f"{metrics['win_rate']:.1f}%", f"{metrics['winning_trades']} wins · {metrics['losing_trades']} losses", tone="neutral")
-        render_metric(row_one[2], "Dias operados", metrics["days_traded"], f"{metrics['total_trades']} operações", tone="neutral")
-        render_metric(row_one[3], "Max drawdown", format_currency(metrics["max_drawdown"]), tone="loss" if metrics["max_drawdown"] < 0 else "neutral")
+        profitability = evaluate_profitability(metrics)
+
+        row_one = st.columns(6)
+        render_metric(row_one[0], "Resultado total", format_currency(metrics["total_result"]), numeric_value=metrics["total_result"], compact=True)
+
+        win_rate_tone = "neutral"
+        if profitability["is_profitable"] is not None:
+            win_rate_tone = "gain" if metrics["win_rate"] / 100 >= profitability["required_win_rate"] else "loss"
+        render_metric(
+            row_one[1], "Win rate", f"{metrics['win_rate']:.1f}%", f"{metrics['winning_trades']}W · {metrics['losing_trades']}L",
+            tone=win_rate_tone, compact=True,
+            help_text="Percentual de operações vencedoras. Verde quando está acima do mínimo necessário para o payoff atual; vermelho quando está abaixo.",
+        )
+
+        render_metric(row_one[2], "Dias operados", metrics["days_traded"], f"{metrics['total_trades']} operações", tone="neutral", compact=True)
+
+        payoff_tone = "neutral"
+        if profitability["payoff"] is None:
+            payoff_text = "N/A"
+        else:
+            payoff_text = f"{profitability['payoff']:.2f}:1"
+            if profitability["required_payoff"] is not None:
+                payoff_tone = "gain" if profitability["payoff"] >= profitability["required_payoff"] else "loss"
+        render_metric(
+            row_one[3], "Payoff", payoff_text, tone=payoff_tone, compact=True,
+            help_text="Ganho médio dividido pela perda média. Verde quando é alto o suficiente para compensar o win rate atual; vermelho quando não é.",
+        )
+
+        if metrics["profit_factor"] is None:
+            pf_text, pf_tone = "N/A", "neutral"
+        else:
+            pf_text = f"{metrics['profit_factor']:.2f}"
+            pf_tone = "gain" if metrics["profit_factor"] >= 1 else "loss"
+        render_metric(
+            row_one[4], "Profit factor", pf_text, tone=pf_tone, compact=True,
+            help_text="Total ganho dividido pelo total perdido. Acima de 1 (verde) significa que o sistema lucra mais do que perde no período; abaixo de 1 (vermelho), o contrário.",
+        )
+
+        if profitability["is_profitable"] is None:
+            xy_text, xy_tone = "N/A", "neutral"
+        else:
+            comparison_symbol = ">" if profitability["is_profitable"] else "≤"
+            xy_text = f"{profitability['gain_side']:.2f} {comparison_symbol} {profitability['loss_side']:.2f}"
+            xy_tone = "gain" if profitability["is_profitable"] else "loss"
+        render_metric(
+            row_one[5], "Regra de lucro", xy_text, tone=xy_tone, compact=True,
+            help_text="Win rate × Payoff comparado com (1 − Win rate) × 1. Quando o primeiro número é maior (verde), o sistema tende a ser lucrativo no longo prazo com o win rate e payoff atuais.",
+        )
 
         tab_overview, tab_advanced, tab_history, tab_manage = st.tabs(
             ["📊 Visão geral", "🔍 Análise avançada", "📅 Histórico", "⚙️ Gerenciar"]
@@ -619,13 +739,26 @@ else:
             equity_col, daily_col = st.columns(2)
             equity_df = filtered_df.sort_values(["trade_date", "entry_time"]).copy()
             equity_df["cumulative_result"] = equity_df["result_financial"].cumsum()
-            fig_equity = px.line(
-                equity_df, x="trade_date", y="cumulative_result", markers=True,
-                labels={"trade_date": "Data", "cumulative_result": "Resultado acumulado (R$)"},
-            )
-            fig_equity.update_traces(
-                line=dict(color="#24d3a0", width=3), marker=dict(color="#6be6c4", size=5),
-                fill="tozeroy", fillcolor="rgba(36, 211, 160, .10)",
+
+            fig_equity = go.Figure()
+            for seg_x, seg_y, is_positive in split_by_sign(equity_df["trade_date"], equity_df["cumulative_result"]):
+                color = "#24d3a0" if is_positive else "#fa5c78"
+                fill_color = "rgba(36, 211, 160, .10)" if is_positive else "rgba(250, 92, 120, .12)"
+                fig_equity.add_trace(go.Scatter(
+                    x=seg_x, y=seg_y, mode="lines", line=dict(color=color, width=3),
+                    fill="tozeroy", fillcolor=fill_color, showlegend=False, hoverinfo="skip",
+                ))
+            # Real data points get their own marker-only trace (colored by
+            # their own sign) so the interpolated zero-crossing points
+            # added above never show up as a fake marker on the chart.
+            marker_colors = ["#6be6c4" if v >= 0 else "#ff8a9e" for v in equity_df["cumulative_result"]]
+            fig_equity.add_trace(go.Scatter(
+                x=equity_df["trade_date"], y=equity_df["cumulative_result"], mode="markers",
+                marker=dict(color=marker_colors, size=5), showlegend=False,
+                hovertemplate="%{x|%d/%m/%Y}<br>R$ %{y:,.2f}<extra></extra>",
+            ))
+            fig_equity.update_layout(
+                xaxis_title="Data", yaxis_title="Resultado acumulado (R$)",
             )
             with equity_col:
                 st.markdown('<div class="chart-card"><h3>Curva de capital</h3>', unsafe_allow_html=True)
@@ -646,11 +779,10 @@ else:
                 st.markdown("</div>", unsafe_allow_html=True)
 
             st.markdown('<div class="section-title">MÉTRICAS COMPLEMENTARES</div>', unsafe_allow_html=True)
-            row_two = st.columns(4)
+            row_two = st.columns(3)
             render_metric(row_two[0], "Média vencedora", format_currency(metrics["average_win"]), tone="gain")
             render_metric(row_two[1], "Média perdedora", format_currency(metrics["average_loss"]), tone="loss" if metrics["average_loss"] < 0 else "neutral")
-            render_metric(row_two[2], "Risco × retorno", f"{metrics['risk_reward']:.2f}:1" if metrics["risk_reward"] is not None else "N/A", tone="neutral")
-            render_metric(row_two[3], "Profit factor", f"{metrics['profit_factor']:.2f}" if metrics["profit_factor"] is not None else "N/A", tone="neutral")
+            render_metric(row_two[2], "Max drawdown", format_currency(metrics["max_drawdown"]), tone="loss" if metrics["max_drawdown"] < 0 else "neutral")
 
             st.markdown('<div class="section-title">RESULTADO LÍQUIDO ESTIMADO</div>', unsafe_allow_html=True)
             st.caption("Taxa de corretagem: R$ 0,18 por contrato, cobrada na entrada e na saída. Imposto: 1% de IRRF sobre o resultado do dia, somente quando positivo (regra oficial de day trade).")
@@ -665,14 +797,63 @@ else:
         # Tab 2 - Análise avançada
         # ------------------------------------------------------------
         with tab_advanced:
-            st.markdown('<div class="chart-card">', unsafe_allow_html=True)
-            st.markdown('<h3>Eficiência das operações</h3>', unsafe_allow_html=True)
-            donut_col, stats_col = st.columns([1.4, 1], gap="medium")
+            revenge_pattern = calculate_revenge_trading_pattern(filtered_df)
+            day_start_pattern = calculate_performance_by_day_start(filtered_df)
+
+            if revenge_pattern.empty:
+                empty_state(
+                    "🎯", "Dados insuficientes para esta análise",
+                    "São necessárias pelo menos duas operações com horário registrado no mesmo dia.",
+                )
+            else:
+                after_loss = revenge_pattern[revenge_pattern["group"] == "Depois de uma perda"]
+                after_win = revenge_pattern[revenge_pattern["group"] == "Depois de uma vitória"]
+                loss_contracts = float(after_loss["avg_contracts"].iloc[0]) if not after_loss.empty else 0.0
+                win_contracts = float(after_win["avg_contracts"].iloc[0]) if not after_win.empty else 0.0
+                loss_result = float(after_loss["avg_result"].iloc[0]) if not after_loss.empty else 0.0
+                win_result = float(after_win["avg_result"].iloc[0]) if not after_win.empty else 0.0
+
+                revenge_row = st.columns(4)
+                render_metric(
+                    revenge_row[0], "Tamanho médio após perda", f"{loss_contracts:.0f} contratos",
+                    tone="loss" if loss_contracts > win_contracts else "neutral",
+                    help_text="Contratos médios nas operações abertas logo depois de uma perda. Maior que 'após vitória' pode indicar tentativa de recuperar rápido (revenge trading).",
+                )
+                render_metric(
+                    revenge_row[1], "Tamanho médio após vitória", f"{win_contracts:.0f} contratos", tone="neutral",
+                    help_text="Contratos médios nas operações abertas logo depois de uma vitória.",
+                )
+                render_metric(
+                    revenge_row[2], "Resultado médio após perda", format_currency(loss_result), numeric_value=loss_result,
+                    help_text="Resultado médio das operações abertas logo depois de uma perda.",
+                )
+                render_metric(
+                    revenge_row[3], "Resultado médio após vitória", format_currency(win_result), numeric_value=win_result,
+                    help_text="Resultado médio das operações abertas logo depois de uma vitória.",
+                )
+
+                if not day_start_pattern.empty:
+                    st.markdown("<div style='height:.7rem'></div>", unsafe_allow_html=True)
+                    start_row = st.columns(2)
+                    start_help = {
+                        "Dias que começaram perdendo": "Resultado médio do dia inteiro, para dias em que a primeira operação foi perdedora.",
+                        "Dias que começaram ganhando": "Resultado médio do dia inteiro, para dias em que a primeira operação foi vencedora.",
+                    }
+                    for col, group_name in zip(start_row, ["Dias que começaram perdendo", "Dias que começaram ganhando"]):
+                        match = day_start_pattern[day_start_pattern["group"] == group_name]
+                        if not match.empty:
+                            avg_result = float(match["avg_daily_result"].iloc[0])
+                            day_count = int(match["day_count"].iloc[0])
+                            render_metric(col, group_name, format_currency(avg_result), f"{day_count} dias", numeric_value=avg_result, help_text=start_help[group_name])
+
+            st.markdown('<div class="section-title">EFICIÊNCIA E ESTRATÉGIA</div>', unsafe_allow_html=True)
+            donut_col, setup_col = st.columns([1, 1.3], gap="medium")
 
             efficiency = calculate_efficiency_breakdown(filtered_df)
             total_ops = efficiency["winners"] + efficiency["losers"] + efficiency["breakeven"]
 
             with donut_col:
+                st.markdown('<div class="chart-card"><h3>Eficiência das operações</h3>', unsafe_allow_html=True)
                 pie_df = pd.DataFrame([
                     {"resultado": "Vencedoras", "quantidade": efficiency["winners"]},
                     {"resultado": "Perdedoras", "quantidade": efficiency["losers"]},
@@ -685,53 +866,64 @@ else:
                 )
                 fig_pie.update_traces(
                     textinfo="percent", textfont_size=13, marker=dict(line=dict(color="#0d1318", width=2)),
+                    hovertemplate="<b>%{label}</b><br>%{value} operações (%{percent})<extra></extra>",
                 )
                 fig_pie.add_annotation(
                     text=f"{total_ops}<br><span style='font-size:11px;color:#8d9a9e'>operações</span>",
                     showarrow=False, font=dict(size=22, color="#eef6f4", family="Consolas, monospace"),
                 )
                 st.plotly_chart(dark_chart(fig_pie), width='stretch', config={"displayModeBar": False})
+                st.markdown("</div>", unsafe_allow_html=True)
 
-            with stats_col:
-                # A compact, custom stat list next to the donut instead of
-                # a second, half-empty chart card - every number here maps
-                # directly to a slice of the donut on the left.
-                st.markdown('<div class="eff-stats">', unsafe_allow_html=True)
-                stat_rows = [
-                    ("eff-dot-gain", "Vencedoras", efficiency["winners"]),
-                    ("eff-dot-loss", "Perdedoras", efficiency["losers"]),
-                    ("eff-dot-neutral", "Zeradas", efficiency["breakeven"]),
-                ]
-                for dot_class, label, count in stat_rows:
-                    share = f"{(count / total_ops * 100):.0f}%" if total_ops else "0%"
-                    st.markdown(
-                        f"""
-                        <div class="eff-row">
-                          <span class="eff-dot {dot_class}"></span>
-                          <span class="eff-label">{label}</span>
-                          <span class="eff-count">{count}</span>
-                          <span class="eff-share">{share}</span>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
-                st.markdown('</div>', unsafe_allow_html=True)
+            with setup_col:
+                by_setup = calculate_performance_by_setup(filtered_df)
+                st.markdown('<div class="chart-card"><h3>Performance por setup</h3>', unsafe_allow_html=True)
+                if by_setup.empty:
+                    empty_state("🎯", "Sem setup atribuído", "Defina um setup para as operações (ao registrar, ou revisando uma importação) para ver esta comparação.")
+                else:
+                    st.plotly_chart(dark_chart(pnl_bar_chart(by_setup, "setup", "Setup")), width='stretch', config={"displayModeBar": False})
+                st.markdown("</div>", unsafe_allow_html=True)
+
+            by_direction = calculate_performance_by_direction(filtered_df)
+            if not by_direction.empty:
+                direction_row = st.columns(2)
+                for col, direction_key in zip(direction_row, ["buy", "sell"]):
+                    match = by_direction[by_direction["direction"] == direction_key]
+                    if not match.empty:
+                        row = match.iloc[0]
+                        render_metric(
+                            col, DIRECTION_LABELS[direction_key], format_currency(row["result_financial"]),
+                            f"{row['trade_count']} operações · {row['win_rate']:.0f}% win rate",
+                            numeric_value=row["result_financial"],
+                        )
+
+            st.markdown('<div class="section-title">ESTADO EMOCIONAL</div>', unsafe_allow_html=True)
+            by_emotion = calculate_performance_by_emotional_state(filtered_df)
+            st.markdown('<div class="chart-card"><h3>Resultado por estado emocional</h3>', unsafe_allow_html=True)
+            st.caption("Cada operação carrega vários estados ao mesmo tempo (ex: \"Calmo, Focado, Ansioso\"), então uma mesma operação soma em cada uma das suas tags.")
+            if by_emotion.empty:
+                empty_state("🧠", "Sem estado emocional registrado", "Preencha o campo ao registrar operações para ver esta análise.")
+            else:
+                st.plotly_chart(dark_chart(pnl_bar_chart(by_emotion, "emotional_state", "Estado emocional")), width='stretch', config={"displayModeBar": False})
             st.markdown("</div>", unsafe_allow_html=True)
 
             st.markdown('<div class="section-title">DESEMPENHO POR MOMENTO DO DIA</div>', unsafe_allow_html=True)
+            hour_col, weekday_col = st.columns(2)
 
-            by_hour = calculate_performance_by_hour(filtered_df)
-            st.markdown('<div class="chart-card"><h3>Performance por horário de entrada</h3>', unsafe_allow_html=True)
-            if by_hour.empty:
-                empty_state("🕐", "Sem horários registrados", "Informe o horário de entrada ao registrar operações para ver esta análise.")
-            else:
-                st.plotly_chart(dark_chart(pnl_bar_chart(by_hour, "hour", "Hora do dia")), width='stretch', config={"displayModeBar": False})
-            st.markdown("</div>", unsafe_allow_html=True)
+            with hour_col:
+                by_hour = calculate_performance_by_hour(filtered_df)
+                st.markdown('<div class="chart-card"><h3>Performance por horário de entrada</h3>', unsafe_allow_html=True)
+                if by_hour.empty:
+                    empty_state("🕐", "Sem horários registrados", "Informe o horário de entrada ao registrar operações para ver esta análise.")
+                else:
+                    st.plotly_chart(dark_chart(pnl_bar_chart(by_hour, "hour", "Hora do dia")), width='stretch', config={"displayModeBar": False})
+                st.markdown("</div>", unsafe_allow_html=True)
 
-            by_weekday = calculate_performance_by_weekday(filtered_df)
-            st.markdown('<div class="chart-card"><h3>Performance por dia da semana</h3>', unsafe_allow_html=True)
-            st.plotly_chart(dark_chart(pnl_bar_chart(by_weekday, "weekday", "Dia da semana")), width='stretch', config={"displayModeBar": False})
-            st.markdown("</div>", unsafe_allow_html=True)
+            with weekday_col:
+                by_weekday = calculate_performance_by_weekday(filtered_df)
+                st.markdown('<div class="chart-card"><h3>Performance por dia da semana</h3>', unsafe_allow_html=True)
+                st.plotly_chart(dark_chart(pnl_bar_chart(by_weekday, "weekday", "Dia da semana")), width='stretch', config={"displayModeBar": False})
+                st.markdown("</div>", unsafe_allow_html=True)
 
             st.markdown('<div class="section-title">ZONAS DE EFICIÊNCIA (MFE × MAE)</div>', unsafe_allow_html=True)
             mfe_col, mae_col = st.columns(2)
@@ -798,137 +990,119 @@ else:
                 st.dataframe(filtered_df, width='stretch', hide_index=True)
 
         # ------------------------------------------------------------
-        # Tab 4 - Gerenciar (edit/delete)
+        # Tab 4 - Gerenciar (one unified table: select rows to edit and/or delete)
         # ------------------------------------------------------------
         with tab_manage:
-            st.markdown('<div class="section-title">EXCLUIR VÁRIAS OPERAÇÕES</div>', unsafe_allow_html=True)
-            st.markdown('<p class="manage-hint">Útil para desfazer uma importação inteira de uma vez: marque as linhas na coluna à esquerda da tabela e clique em excluir.</p>', unsafe_allow_html=True)
+            st.markdown('<div class="section-title">GERENCIAR OPERAÇÕES</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<p class="manage-hint">Marque uma operação para editá-la, ou várias para excluir em lote '
+                '(útil para desfazer uma importação inteira de uma vez).</p>',
+                unsafe_allow_html=True,
+            )
 
             if working_df.empty:
-                empty_state("🗂️", "Nenhuma operação disponível", "Registre ou importe operações para poder excluí-las em lote aqui.")
+                empty_state("🗂️", "Nenhuma operação disponível", "Registre ou importe operações para gerenciá-las aqui.")
             else:
-                bulk_df = working_df.sort_values("trade_date", ascending=False)[
+                manage_df = working_df.sort_values("trade_date", ascending=False)[
                     ["id", "trade_date", "entry_time", "direction", "setup", "contracts", "result_financial"]
                 ]
                 selection = st.dataframe(
-                    bulk_df, width='stretch', hide_index=True, on_select="rerun", selection_mode="multi-row",
+                    manage_df, width='stretch', hide_index=True, on_select="rerun", selection_mode="multi-row",
                     column_config={
                         "id": "ID", "trade_date": "Data", "entry_time": "Entrada", "direction": "Direção",
                         "setup": "Setup", "contracts": "Contratos",
                         "result_financial": st.column_config.NumberColumn("Resultado (R$)", format="R$ %.2f"),
                     },
-                    key="bulk_delete_table",
+                    key="manage_trades_table",
                 )
                 selected_rows = selection["selection"]["rows"]
-                selected_count = len(selected_rows)
+                selected_ids = [int(manage_df.iloc[i]["id"]) for i in selected_rows]
+                selected_count = len(selected_ids)
 
-                if st.button(
-                    f"🗑️ Excluir {selected_count} selecionada(s)" if selected_count else "🗑️ Excluir selecionadas",
-                    disabled=selected_count == 0,
-                ):
-                    selected_ids = [int(bulk_df.iloc[i]["id"]) for i in selected_rows]
-                    confirm_bulk_delete_dialog(connection, selected_ids)
+                if selected_count == 0:
+                    st.caption("Nenhuma operação selecionada.")
+                elif selected_count > 1:
+                    st.caption(f"{selected_count} operações selecionadas. Edição só funciona com 1 operação por vez - mas a exclusão funciona em lote.")
+                    if st.button(f"🗑️ Excluir {selected_count} selecionadas", type="secondary"):
+                        confirm_bulk_delete_dialog(connection, selected_ids)
+                else:
+                    selected_id = selected_ids[0]
+                    trade_to_edit = get_trade(connection, selected_id)
 
-            st.divider()
+                    if st.button("🗑️ Excluir esta operação", type="secondary"):
+                        confirm_bulk_delete_dialog(connection, selected_ids)
 
-            st.markdown('<div class="section-title">EDITAR OU EXCLUIR OPERAÇÃO</div>', unsafe_allow_html=True)
-            st.markdown('<p class="manage-hint">Escolha uma operação abaixo para revisar os dados, corrigir algo ou removê-la do diário.</p>', unsafe_allow_html=True)
+                    with st.form("edit_trade_form"):
+                        date_col, entry_time_col, exit_time_col = st.columns(3)
+                        with date_col:
+                            edit_date = st.date_input("Data", value=pd.to_datetime(trade_to_edit["trade_date"]).date())
+                        with entry_time_col:
+                            existing_entry_time = trade_to_edit.get("entry_time")
+                            edit_entry_time = st.time_input(
+                                "Horário de entrada",
+                                value=pd.to_datetime(existing_entry_time).time() if existing_entry_time else None,
+                            )
+                        with exit_time_col:
+                            existing_exit_time = trade_to_edit.get("exit_time")
+                            edit_exit_time = st.time_input(
+                                "Horário de saída",
+                                value=pd.to_datetime(existing_exit_time).time() if existing_exit_time else None,
+                            )
 
-            # Build a human-readable label for each trade in the current view,
-            # so the person picks "which trade" without needing to know its id.
-            editable_df = working_df.sort_values("trade_date", ascending=False)
-            trade_options = {
-                int(row["id"]): (
-                    f"#{int(row['id'])} · {row['trade_date'].strftime('%d/%m/%Y')} · "
-                    f"{row['setup'] or '—'} · {format_currency(row['result_financial'])}"
-                )
-                for _, row in editable_df.iterrows()
-            }
+                        direction_col, setup_col = st.columns(2)
+                        with direction_col:
+                            edit_direction = st.selectbox(
+                                "Direção", ["buy", "sell"],
+                                index=["buy", "sell"].index(trade_to_edit["direction"]),
+                                format_func=lambda item: DIRECTION_LABELS[item],
+                            )
+                        with setup_col:
+                            edit_setup = st.selectbox(
+                                "Setup", SETUP_OPTIONS,
+                                index=SETUP_OPTIONS.index(trade_to_edit["setup"]) if trade_to_edit["setup"] in SETUP_OPTIONS else 0,
+                            )
 
-            if not trade_options:
-                empty_state("🗂️", "Nenhuma operação disponível", "Registre uma operação para poder editá-la ou excluí-la aqui.")
-            else:
-                selected_id = st.selectbox(
-                    "Selecionar operação",
-                    options=list(trade_options.keys()),
-                    format_func=lambda trade_id: trade_options[trade_id],
-                )
-                trade_to_edit = get_trade(connection, selected_id)
+                        entry_col, exit_col, contracts_col = st.columns(3)
+                        with entry_col:
+                            edit_entry_price = st.number_input("Entrada (pts)", min_value=0.0, step=5.0, value=float(trade_to_edit["entry_price"]), format="%.0f")
+                        with exit_col:
+                            edit_exit_price = st.number_input("Saída (pts)", min_value=0.0, step=5.0, value=float(trade_to_edit["exit_price"]), format="%.0f")
+                        with contracts_col:
+                            edit_contracts = st.number_input("Contratos", min_value=1, step=1, value=int(trade_to_edit["contracts"]))
 
-                with st.form("edit_trade_form"):
-                    date_col, entry_time_col, exit_time_col = st.columns(3)
-                    with date_col:
-                        edit_date = st.date_input("Data", value=pd.to_datetime(trade_to_edit["trade_date"]).date())
-                    with entry_time_col:
-                        existing_entry_time = trade_to_edit.get("entry_time")
-                        edit_entry_time = st.time_input(
-                            "Horário de entrada",
-                            value=pd.to_datetime(existing_entry_time).time() if existing_entry_time else None,
+                        edit_stop_points = st.number_input("Stop (pontos)", min_value=0.0, step=10.0, value=float(trade_to_edit["stop_points"] or 0.0), format="%.0f")
+
+                        existing_states = [
+                            state.strip() for state in (trade_to_edit.get("emotional_state") or "").split(",") if state.strip()
+                        ]
+                        edit_emotional_state = st.multiselect(
+                            "Estado emocional", EMOTIONAL_STATES, default=existing_states,
+                            help=f"Selecione pelo menos {MIN_EMOTIONAL_STATES} estados que descrevem como você estava durante a operação.",
                         )
-                    with exit_time_col:
-                        existing_exit_time = trade_to_edit.get("exit_time")
-                        edit_exit_time = st.time_input(
-                            "Horário de saída",
-                            value=pd.to_datetime(existing_exit_time).time() if existing_exit_time else None,
+                        edit_technical_notes = st.text_area(
+                            "O que você fez e por quê?",
+                            value=trade_to_edit["technical_notes"] or "",
+                            placeholder="O que viu no gráfico? Por que entrou? O que faria diferente?",
                         )
 
-                    direction_col, setup_col = st.columns(2)
-                    with direction_col:
-                        edit_direction = st.selectbox(
-                            "Direção", ["buy", "sell"],
-                            index=["buy", "sell"].index(trade_to_edit["direction"]),
-                            format_func=lambda item: DIRECTION_LABELS[item],
-                        )
-                    with setup_col:
-                        edit_setup = st.selectbox(
-                            "Setup", SETUP_OPTIONS,
-                            index=SETUP_OPTIONS.index(trade_to_edit["setup"]) if trade_to_edit["setup"] in SETUP_OPTIONS else 0,
-                        )
+                        save_edit = st.form_submit_button("Salvar alterações", width='stretch')
 
-                    entry_col, exit_col, contracts_col = st.columns(3)
-                    with entry_col:
-                        edit_entry_price = st.number_input("Entrada (pts)", min_value=0.0, step=5.0, value=float(trade_to_edit["entry_price"]), format="%.0f")
-                    with exit_col:
-                        edit_exit_price = st.number_input("Saída (pts)", min_value=0.0, step=5.0, value=float(trade_to_edit["exit_price"]), format="%.0f")
-                    with contracts_col:
-                        edit_contracts = st.number_input("Contratos", min_value=1, step=1, value=int(trade_to_edit["contracts"]))
-
-                    edit_stop_points = st.number_input("Stop (pontos)", min_value=0.0, step=10.0, value=float(trade_to_edit["stop_points"] or 0.0), format="%.0f")
-
-                    existing_states = [
-                        state.strip() for state in (trade_to_edit.get("emotional_state") or "").split(",") if state.strip()
-                    ]
-                    edit_emotional_state = st.multiselect(
-                        "Estado emocional", EMOTIONAL_STATES, default=existing_states,
-                        help=f"Selecione pelo menos {MIN_EMOTIONAL_STATES} estados que descrevem como você estava durante a operação.",
-                    )
-                    edit_technical_notes = st.text_area(
-                        "O que você fez e por quê?",
-                        value=trade_to_edit["technical_notes"] or "",
-                        placeholder="O que viu no gráfico? Por que entrou? O que faria diferente?",
-                    )
-
-                    save_edit = st.form_submit_button("Salvar alterações", width='stretch')
-
-                    if save_edit:
-                        if len(edit_emotional_state) < MIN_EMOTIONAL_STATES:
-                            st.error(f"Selecione pelo menos {MIN_EMOTIONAL_STATES} estados emocionais.")
-                        else:
-                            try:
-                                update_trade(
-                                    connection, selected_id,
-                                    trade_date=str(edit_date), direction=edit_direction,
-                                    entry_time=edit_entry_time.strftime("%H:%M:%S") if edit_entry_time else None,
-                                    exit_time=edit_exit_time.strftime("%H:%M:%S") if edit_exit_time else None,
-                                    entry_price=edit_entry_price, exit_price=edit_exit_price,
-                                    contracts=edit_contracts, setup=edit_setup, stop_points=edit_stop_points,
-                                    emotional_state=", ".join(edit_emotional_state),
-                                    technical_notes=edit_technical_notes or None,
-                                )
-                                st.session_state["flash_success"] = "Operação atualizada com sucesso."
-                                st.rerun()
-                            except ValueError as error:
-                                st.error(f"Não foi possível salvar: {error}")
-
-                if st.button("🗑️ Excluir esta operação", type="secondary"):
-                    confirm_delete_dialog(connection, selected_id, trade_options[selected_id])
+                        if save_edit:
+                            if len(edit_emotional_state) < MIN_EMOTIONAL_STATES:
+                                st.error(f"Selecione pelo menos {MIN_EMOTIONAL_STATES} estados emocionais.")
+                            else:
+                                try:
+                                    update_trade(
+                                        connection, selected_id,
+                                        trade_date=str(edit_date), direction=edit_direction,
+                                        entry_time=edit_entry_time.strftime("%H:%M:%S") if edit_entry_time else None,
+                                        exit_time=edit_exit_time.strftime("%H:%M:%S") if edit_exit_time else None,
+                                        entry_price=edit_entry_price, exit_price=edit_exit_price,
+                                        contracts=edit_contracts, setup=edit_setup, stop_points=edit_stop_points,
+                                        emotional_state=", ".join(edit_emotional_state),
+                                        technical_notes=edit_technical_notes or None,
+                                    )
+                                    st.session_state["flash_success"] = "Operação atualizada com sucesso."
+                                    st.rerun()
+                                except ValueError as error:
+                                    st.error(f"Não foi possível salvar: {error}")

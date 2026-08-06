@@ -15,6 +15,9 @@ from project import (
     parse_broker_csv, filter_by_time_range, classify_shift, filter_by_shift,
     calculate_efficiency_breakdown, calculate_performance_by_hour,
     calculate_performance_by_weekday, calculate_streaks,
+    calculate_performance_by_setup, calculate_performance_by_direction,
+    calculate_performance_by_emotional_state,
+    calculate_revenge_trading_pattern, calculate_performance_by_day_start,
     calculate_mfe_efficiency, calculate_mae_efficiency,
 )
 from database import initialize_database
@@ -544,3 +547,93 @@ def test_calculate_mae_efficiency_percentages():
     assert row_100["trade_count"] == 2
     assert row_100["reached"] == 1  # only -220 went past -100
     assert row_100["percentage"] == 50.0
+
+
+# ---------- calculate_performance_by_setup / by_direction / by_emotional_state ----------
+
+def test_calculate_performance_by_setup_groups_and_sorts():
+    df = pd.DataFrame([
+        {"setup": "TA", "result_financial": 100.0},
+        {"setup": "TA", "result_financial": -50.0},
+        {"setup": "TC", "result_financial": 300.0},
+        {"setup": None, "result_financial": 999.0},  # excluded - no setup tagged
+    ])
+    by_setup = calculate_performance_by_setup(df)
+
+    assert len(by_setup) == 2  # the untagged row doesn't create a group
+    assert by_setup.iloc[0]["setup"] == "TC"  # sorted by result descending
+    ta_row = by_setup[by_setup["setup"] == "TA"].iloc[0]
+    assert ta_row["result_financial"] == 50.0
+    assert ta_row["trade_count"] == 2
+    assert ta_row["win_rate"] == 50.0
+
+
+def test_calculate_performance_by_direction_splits_buy_sell():
+    df = pd.DataFrame([
+        {"direction": "buy", "result_financial": 100.0},
+        {"direction": "buy", "result_financial": 100.0},
+        {"direction": "sell", "result_financial": -40.0},
+    ])
+    by_direction = calculate_performance_by_direction(df)
+
+    buy_row = by_direction[by_direction["direction"] == "buy"].iloc[0]
+    assert buy_row["result_financial"] == 200.0
+    assert buy_row["win_rate"] == 100.0
+    sell_row = by_direction[by_direction["direction"] == "sell"].iloc[0]
+    assert sell_row["result_financial"] == -40.0
+
+
+def test_calculate_performance_by_emotional_state_counts_each_tag():
+    # A trade tagged with 3 states contributes to all 3 groups, not just one.
+    df = pd.DataFrame([
+        {"emotional_state": "Calmo, Focado, Confiante", "result_financial": 300.0},
+        {"emotional_state": "Ansioso, Impulsivo, Irritado", "result_financial": -100.0},
+        {"emotional_state": None, "result_financial": 50.0},  # excluded - no tags
+    ])
+    by_state = calculate_performance_by_emotional_state(df)
+
+    assert len(by_state) == 6  # 3 tags from each of the two tagged trades
+    calmo_row = by_state[by_state["emotional_state"] == "Calmo"].iloc[0]
+    assert calmo_row["result_financial"] == 300.0
+    ansioso_row = by_state[by_state["emotional_state"] == "Ansioso"].iloc[0]
+    assert ansioso_row["result_financial"] == -100.0
+
+
+# ---------- calculate_revenge_trading_pattern / calculate_performance_by_day_start ----------
+
+def test_calculate_revenge_trading_pattern_compares_after_loss_vs_after_win():
+    df = pd.DataFrame([
+        {"trade_date": pd.Timestamp("2026-07-01"), "entry_time": "09:00", "contracts": 20, "result_financial": 500.0},
+        {"trade_date": pd.Timestamp("2026-07-01"), "entry_time": "09:10", "contracts": 20, "result_financial": -300.0},
+        {"trade_date": pd.Timestamp("2026-07-01"), "entry_time": "09:20", "contracts": 60, "result_financial": -900.0},
+    ])
+    pattern = calculate_revenge_trading_pattern(df)
+
+    # Trade 1 (the day's first) is excluded - it has no previous trade.
+    after_loss = pattern[pattern["group"] == "Depois de uma perda"].iloc[0]
+    assert after_loss["avg_contracts"] == 60.0
+    assert after_loss["trade_count"] == 1
+    after_win = pattern[pattern["group"] == "Depois de uma vitória"].iloc[0]
+    assert after_win["avg_contracts"] == 20.0
+
+
+def test_calculate_revenge_trading_pattern_needs_at_least_two_timed_trades():
+    df = pd.DataFrame([{"trade_date": pd.Timestamp("2026-07-01"), "entry_time": "09:00", "contracts": 20, "result_financial": 100.0}])
+    pattern = calculate_revenge_trading_pattern(df)
+    assert pattern.empty
+
+
+def test_calculate_performance_by_day_start_compares_daily_totals():
+    df = pd.DataFrame([
+        {"trade_date": pd.Timestamp("2026-07-01"), "entry_time": "09:00", "result_financial": -100.0},
+        {"trade_date": pd.Timestamp("2026-07-01"), "entry_time": "09:10", "result_financial": -400.0},
+        {"trade_date": pd.Timestamp("2026-07-02"), "entry_time": "09:00", "result_financial": 200.0},
+        {"trade_date": pd.Timestamp("2026-07-02"), "entry_time": "09:10", "result_financial": 100.0},
+    ])
+    by_start = calculate_performance_by_day_start(df)
+
+    lost_start = by_start[by_start["group"] == "Dias que começaram perdendo"].iloc[0]
+    assert lost_start["avg_daily_result"] == -500.0
+    assert lost_start["day_count"] == 1
+    won_start = by_start[by_start["group"] == "Dias que começaram ganhando"].iloc[0]
+    assert won_start["avg_daily_result"] == 300.0

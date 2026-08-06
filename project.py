@@ -570,6 +570,149 @@ def calculate_performance_by_weekday(df):
     return grouped[columns]
 
 
+def calculate_performance_by_setup(df):
+    """
+    Group trades by setup/strategy (TA, TC, TRM, FQ, ...) and compute the
+    result and win rate for each one. This is the single most direct
+    answer to "which of my strategies is actually making money" -
+    something the setup filter lets you narrow down to, but never
+    directly compares side by side.
+    """
+    columns = ["setup", "result_financial", "trade_count", "win_rate"]
+    working = df[df["setup"].notna()]
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = working.groupby("setup").agg(
+        result_financial=("result_financial", "sum"),
+        trade_count=("result_financial", "count"),
+        wins=("result_financial", lambda s: (s > 0).sum()),
+    ).reset_index()
+    grouped["win_rate"] = round(grouped["wins"] / grouped["trade_count"] * 100, 1)
+    return grouped[columns].sort_values("result_financial", ascending=False)
+
+
+def calculate_performance_by_direction(df):
+    """
+    Compare buy (compra) vs sell (venda) trades. Answers "am I actually
+    better at going long or short", which is easy to have a gut feeling
+    about but rarely checked against the real numbers.
+    """
+    columns = ["direction", "result_financial", "trade_count", "win_rate"]
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    grouped = df.groupby("direction").agg(
+        result_financial=("result_financial", "sum"),
+        trade_count=("result_financial", "count"),
+        wins=("result_financial", lambda s: (s > 0).sum()),
+    ).reset_index()
+    grouped["win_rate"] = round(grouped["wins"] / grouped["trade_count"] * 100, 1)
+    return grouped[columns]
+
+
+def calculate_performance_by_emotional_state(df):
+    """
+    Break down results by emotional state tag. Each trade can carry
+    several tags at once (e.g. "Calmo, Focado, Ansioso" - at least 3 are
+    required when logging a trade), so a single trade contributes to
+    every tag it was marked with. This answers "how do my trades tend to
+    go when I'm feeling X", which is the entire point of collecting this
+    field in the first place - and, until now, nothing in the dashboard
+    actually used it for analysis.
+    """
+    columns = ["emotional_state", "result_financial", "trade_count", "win_rate"]
+    working = df[df["emotional_state"].notna() & (df["emotional_state"] != "")]
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    exploded_rows = []
+    for _, trade in working.iterrows():
+        for state in trade["emotional_state"].split(","):
+            state = state.strip()
+            if state:
+                exploded_rows.append({"emotional_state": state, "result_financial": trade["result_financial"]})
+
+    if not exploded_rows:
+        return pd.DataFrame(columns=columns)
+
+    exploded = pd.DataFrame(exploded_rows)
+    grouped = exploded.groupby("emotional_state").agg(
+        result_financial=("result_financial", "sum"),
+        trade_count=("result_financial", "count"),
+        wins=("result_financial", lambda s: (s > 0).sum()),
+    ).reset_index()
+    grouped["win_rate"] = round(grouped["wins"] / grouped["trade_count"] * 100, 1)
+    return grouped[columns].sort_values("result_financial", ascending=False)
+
+
+def calculate_revenge_trading_pattern(df):
+    """
+    Compare trades taken right after a loss to trades taken right after a
+    win, within the same day: average position size and average result
+    for each group. This is the quantitative signature of "revenge
+    trading" - sizing up to try to win a loss back quickly, which
+    usually compounds the damage instead of fixing it.
+
+    Only trades with a recorded entry_time can be ordered within a day,
+    so untimed trades are excluded. The very first trade of each day has
+    no "previous trade" and is excluded from both groups.
+    """
+    columns = ["group", "avg_contracts", "avg_result", "trade_count"]
+    timed = df[df["entry_time"].notna()].copy()
+    if len(timed) < 2:
+        return pd.DataFrame(columns=columns)
+
+    timed = timed.sort_values(["trade_date", "entry_time"])
+    timed["prev_result"] = timed.groupby("trade_date")["result_financial"].shift(1)
+    timed = timed[timed["prev_result"].notna()]
+
+    rows = []
+    for label, mask in [
+        ("Depois de uma perda", timed["prev_result"] < 0),
+        ("Depois de uma vitória", timed["prev_result"] >= 0),
+    ]:
+        subset = timed[mask]
+        if not subset.empty:
+            rows.append({
+                "group": label,
+                "avg_contracts": round(subset["contracts"].mean(), 1),
+                "avg_result": round(subset["result_financial"].mean(), 2),
+                "trade_count": len(subset),
+            })
+    return pd.DataFrame(rows, columns=columns)
+
+
+def calculate_performance_by_day_start(df):
+    """
+    Compare the average full-day result depending on whether that day's
+    FIRST trade was a win or a loss - a proxy for "does a bad start
+    derail the rest of the day".
+    """
+    columns = ["group", "avg_daily_result", "day_count"]
+    timed = df[df["entry_time"].notna()].copy()
+    if timed.empty:
+        return pd.DataFrame(columns=columns)
+
+    timed = timed.sort_values(["trade_date", "entry_time"])
+    first_per_day = timed.groupby("trade_date").first()
+    daily_totals = timed.groupby("trade_date")["result_financial"].sum()
+
+    rows = []
+    for label, mask in [
+        ("Dias que começaram perdendo", first_per_day["result_financial"] < 0),
+        ("Dias que começaram ganhando", first_per_day["result_financial"] >= 0),
+    ]:
+        days = first_per_day[mask].index
+        if len(days) > 0:
+            rows.append({
+                "group": label,
+                "avg_daily_result": round(daily_totals[days].mean(), 2),
+                "day_count": int(len(days)),
+            })
+    return pd.DataFrame(rows, columns=columns)
+
+
 def calculate_streaks(df):
     """
     Compute the current winning/losing streak and the longest ones ever
